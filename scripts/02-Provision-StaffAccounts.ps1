@@ -22,7 +22,32 @@
 $TenantDomain   = "cloudninewellness.onmicrosoft.com"
 $UsageLocation  = "CA"   # Canada
 $LicenseSKU     = "cloudninewellness:O365_BUSINESS_PREMIUM"  # M365 Business Standard
-$TempPassword   = "TempPass2026!" # Users prompted to change on first login
+#endregion
+
+#region --- Helper: Random Temp Password ---
+# Generates a unique 14-character temp password per user instead of a single shared
+# static value. Sharing one temp password across an entire batch of new accounts is
+# a real credential-stuffing/brute-force risk during the window before first sign-in.
+function New-RandomTempPassword {
+    param([int]$Length = 14)
+    $upper   = 65..90 | ForEach-Object { [char]$_ }
+    $lower   = 97..122 | ForEach-Object { [char]$_ }
+    $digits  = 48..57 | ForEach-Object { [char]$_ }
+    $special = @('!','@','#','$','%','&','*')
+
+    # Guarantee at least one of each character class, then fill the rest randomly
+    $passwordChars = @(
+        ($upper   | Get-Random)
+        ($lower   | Get-Random)
+        ($digits  | Get-Random)
+        ($special | Get-Random)
+    )
+    $allChars = $upper + $lower + $digits + $special
+    $passwordChars += 1..($Length - $passwordChars.Count) | ForEach-Object { $allChars | Get-Random }
+
+    # Shuffle so the guaranteed characters aren't always in the same positions
+    return -join ($passwordChars | Sort-Object { Get-Random })
+}
 #endregion
 
 #region --- Staff Account Definitions ---
@@ -60,11 +85,13 @@ Write-Host "`n[INFO] Provisioning $($StaffAccounts.Count) staff accounts..." -Fo
 
 $SuccessCount = 0
 $FailCount    = 0
+$CredentialHandoff = @()   # unique temp password per user, for secure 1:1 handoff — never logged/emailed as a batch
 
 foreach ($Staff in $StaffAccounts) {
     $UPN         = "$($Staff.FirstName.ToLower()).$($Staff.LastName.ToLower().Replace('-',''))@$TenantDomain"
     $DisplayName = "$($Staff.FirstName) $($Staff.LastName)"
     $MailNick    = "$($Staff.FirstName.ToLower())$($Staff.LastName.ToLower().Replace('-','').Replace(' ',''))"
+    $TempPassword = New-RandomTempPassword
 
     $PasswordProfile = @{
         Password                      = $TempPassword
@@ -93,6 +120,11 @@ foreach ($Staff in $StaffAccounts) {
         Set-MgUserLicense -UserId $NewUser.Id -AddLicenses $LicenseObj.AddLicenses -RemoveLicenses $LicenseObj.RemoveLicenses | Out-Null
 
         Write-Host "  [OK] Created: $DisplayName ($UPN) — $($Staff.Role) @ $($Staff.Location)" -ForegroundColor Green
+        $CredentialHandoff += [PSCustomObject]@{
+            DisplayName  = $DisplayName
+            UPN          = $UPN
+            TempPassword = $TempPassword
+        }
         $SuccessCount++
     } catch {
         Write-Host "  [FAIL] $DisplayName ($UPN): $_" -ForegroundColor Red
@@ -105,5 +137,13 @@ foreach ($Staff in $StaffAccounts) {
 Write-Host "`n[SUMMARY] Provisioning complete." -ForegroundColor Cyan
 Write-Host "  Accounts created : $SuccessCount"
 Write-Host "  Failures         : $FailCount"
+
+# Export unique temp passwords to a local file for secure 1:1 handoff to each new hire.
+# This file contains plaintext credentials — treat it as sensitive: hand off individually,
+# then delete it. Do not email it as a batch or leave it in a shared location.
+$HandoffPath = Join-Path $PSScriptRoot "staff-temp-credentials-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
+$CredentialHandoff | Export-Csv -Path $HandoffPath -NoTypeInformation
+Write-Host "  Temp credentials exported to: $HandoffPath (sensitive — handle per handoff policy, then delete)" -ForegroundColor Yellow
+
 Write-Host "[NEXT] Run 03-Configure-Groups.ps1 to create and populate security groups.`n" -ForegroundColor Cyan
 #endregion
